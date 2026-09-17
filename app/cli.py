@@ -23,6 +23,7 @@ from app.prompts import (
     build_patch_prompt,
     build_plan_prompt,
     build_proposal_prompt,
+    parse_plan_files,
 )
 from app.repo_scanner import RepositoryScanner, build_context_for_issue
 from app.test_runner import TestRunner
@@ -306,35 +307,74 @@ def patch(
     plan_md = plan_path.read_text()
     
     console.print(f"[green]Generating patch for issue #{issue_number}[/green]")
-    
+
+    # Ground the patch: every file named in the plan that actually exists
+    # in the repo is added to the context, so the LLM never has to invent
+    # file contents. Hallucinated paths are flagged, not fed, to the model.
+    scanner = RepositoryScanner(ZULIP_REPO_PATH)
+    merged_files = list(context["files"])
+    merged_contents = dict(context["file_contents"])
+    missing = []
+    for plan_file in parse_plan_files(plan_md)[:6]:
+        if plan_file in merged_contents:
+            continue
+        content = scanner.get_file_context(plan_file)
+        if content:
+            merged_contents[plan_file] = content
+            merged_files.append(plan_file)
+        else:
+            missing.append(plan_file)
+    context = {
+        **context,
+        "files": merged_files,
+        "file_contents": merged_contents,
+        "plan_files_missing": missing,
+    }
+    if missing:
+        console.print(f"[yellow]Plan lists files not in repo (excluded): {', '.join(missing)}[/yellow]")
+    console.print(f"[cyan]Patch context: {len(merged_contents)} file(s)[/cyan]")
+
     llm = LLMClient()
     issue = {"title": context.get("issue_title", ""), "number": issue_number}
     user_prompt = build_patch_prompt(issue, plan_md, context)
     # Large token budget: reasoning models can burn tokens before emitting the diff
     patch = llm.complete(PATCH_PROMPT, user_prompt, temperature=0.1, max_tokens=8000)
     
+    output_dir = Path("outputs") / f"issue-{issue_number}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Validate BEFORE saving: never let reasoning prose or a truncated
+    # fragment clobber a previous good .patch file.
+    stripped = patch.lstrip()
+    is_valid = (
+        stripped.startswith("diff --git ")
+        and "@@" in patch
+        and "--- a/" in patch
+        and "+++ b/" in patch
+    )
+    if not is_valid:
+        console.print("[red]LLM did not return a valid unified diff.[/red]")
+        if not stripped.startswith("diff --git"):
+            console.print("[yellow]Output is reasoning prose, not a diff — the file context[/yellow]")
+            console.print("[yellow]likely lacks the source files from the plan. Re-run 'analyze'[/yellow]")
+            console.print("[yellow](improved search now excludes .claude//.github/ and ranks by[/yellow]")
+            console.print("[yellow]keyword hits), then 'plan', then 'patch' again.[/yellow]")
+        else:
+            console.print("[yellow]The diff is truncated (missing hunks). Re-run 'patch' to retry.[/yellow]")
+        # Show only a preview so a 700-line ramble doesn't flood the terminal
+        preview = "\n".join(patch.split("\n")[:30])
+        console.print(f"\n[dim]First 30 lines of raw output:[/dim]\n{preview}")
+        if save:
+            rejected = output_dir / "03-proposed.rejected.txt"
+            rejected.write_text(patch, encoding="utf-8")
+            console.print(f"\n[yellow]Raw output saved to {rejected} (existing .patch left untouched).[/yellow]")
+        raise typer.Exit(1)
+
     # Display patch with syntax highlighting
     syntax = Syntax(patch, "diff", theme="monokai", line_numbers=True)
     console.print(syntax)
 
-    # Detect empty / placeholder / truncated diffs so `apply` doesn't fail cryptically
-    is_placeholder = (
-        "diff --git" not in patch
-        or "@@" not in patch
-        or ("dev/null" in patch and "--- a/" not in patch)
-    )
-    if is_placeholder:
-        console.print("[red]LLM returned an empty/placeholder/truncated diff.[/red]")
-        if "@@" not in patch:
-            console.print("[yellow]The diff was cut off (no @@ hunk headers) — likely token budget.[/yellow]")
-            console.print("[yellow]Just re-run 'patch' again to retry with the larger budget.[/yellow]")
-        else:
-            console.print("[yellow]The supplied file context may not include the source files.[/yellow]")
-            console.print("[yellow]Re-run 'analyze' on the fresh Zulip clone, then 'plan', then 'patch'.[/yellow]")
-
     if save:
-        output_dir = Path("outputs") / f"issue-{issue_number}"
-        output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "03-proposed.patch").write_text(patch, encoding="utf-8")
         console.print(f"\n[green]Patch saved to {output_dir}/03-proposed.patch[/green]")
         console.print("[yellow]Review the patch before applying![/yellow]")

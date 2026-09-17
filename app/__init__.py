@@ -24,6 +24,7 @@ from app.prompts import (
     build_patch_prompt,
     build_plan_prompt,
     build_proposal_prompt,
+    parse_plan_files,
 )
 from app.repo_scanner import RepositoryScanner, build_context_for_issue
 from app.test_runner import TestResult as TestRunnerResult
@@ -60,6 +61,7 @@ __all__ = [
     "build_patch_prompt",
     "build_plan_prompt",
     "build_proposal_prompt",
+    "parse_plan_files",
     "rank_issues",
     "score_issue",
 ]

@@ -1,7 +1,94 @@
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.repo_scanner import RepositoryScanner, build_context_for_issue
+
+
+def _mock_grep(mapping: dict[str, str]):
+    """Return a subprocess.run replacement serving canned git grep output."""
+    def _run(cmd, **kwargs):
+        term = cmd[-1]
+        result = MagicMock()
+        result.stdout = mapping.get(term, "")
+        result.stderr = ""
+        result.returncode = 0
+        return result
+    return _run
+
+
+def test_find_relevant_files_ranks_by_keyword_hits():
+    """Files matching more keywords rank first."""
+    scanner = RepositoryScanner(Path("/tmp"))
+    mapping = {
+        "wildcard": "zerver/lib/permissions.py\nweb/src/compose.js\n",
+        "mention": "zerver/lib/permissions.py\n",
+    }
+    with patch("app.repo_scanner.subprocess.run", side_effect=_mock_grep(mapping)):
+        files = scanner.find_relevant_files(["wildcard", "mention"])
+
+    assert files[0] == "zerver/lib/permissions.py"
+    assert "web/src/compose.js" in files
+
+
+def test_find_relevant_files_excludes_metadata_dirs():
+    """Dot-directories and .github never surface as relevant files."""
+    scanner = RepositoryScanner(Path("/tmp"))
+    mapping = {
+        "wildcard": ".claude/rules/x.md\n.github/workflows/ci.yml\nzerver/models/streams.py\n",
+    }
+    with patch("app.repo_scanner.subprocess.run", side_effect=_mock_grep(mapping)):
+        files = scanner.find_relevant_files(["wildcard"])
+
+    assert ".claude/rules/x.md" not in files
+    assert ".github/workflows/ci.yml" not in files
+    assert files == ["zerver/models/streams.py"]
+
+
+def test_find_relevant_files_ignores_short_terms():
+    """Terms of length <= 3 are not searched (they match substrings everywhere)."""
+    scanner = RepositoryScanner(Path("/tmp"))
+    with patch("app.repo_scanner.subprocess.run") as mock_run:
+        files = scanner.find_relevant_files(["per", "an", "the"])
+
+    mock_run.assert_not_called()
+    assert files == []
+
+
+def test_find_relevant_files_weights_rare_terms_higher():
+    """A file matching a rare term outranks one matching only a common term."""
+    scanner = RepositoryScanner(Path("/tmp"))
+    mapping = {
+        "wildcard": "zerver/models/streams.py\n",
+        "description": "docs/a.md\ndocs/b.md\ndocs/c.md\ndocs/d.md\n",
+    }
+    with patch("app.repo_scanner.subprocess.run", side_effect=_mock_grep(mapping)):
+        files = scanner.find_relevant_files(["wildcard", "description"])
+
+    assert files[0] == "zerver/models/streams.py"
+
+
+def test_find_relevant_files_deprioritizes_locale_catalogs():
+    """Generated translation catalogs sort after real files on equal scores."""
+    scanner = RepositoryScanner(Path("/tmp"))
+    mapping = {
+        "mention": "locale/fr/translations.json\nweb/src/compose.js\n",
+    }
+    with patch("app.repo_scanner.subprocess.run", side_effect=_mock_grep(mapping)):
+        files = scanner.find_relevant_files(["mention"])
+
+    assert files.index("web/src/compose.js") < files.index("locale/fr/translations.json")
+
+
+def test_find_relevant_files_prefers_source_over_tests():
+    """On equal hit counts, source files come before test files."""
+    scanner = RepositoryScanner(Path("/tmp"))
+    mapping = {
+        "wildcard": "zerver/lib/permissions.py\nzerver/tests/test_perms.py\n",
+    }
+    with patch("app.repo_scanner.subprocess.run", side_effect=_mock_grep(mapping)):
+        files = scanner.find_relevant_files(["wildcard"])
+
+    assert files.index("zerver/lib/permissions.py") < files.index("zerver/tests/test_perms.py")
 
 
 def test_extract_keywords():

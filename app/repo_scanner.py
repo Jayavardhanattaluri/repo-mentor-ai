@@ -79,30 +79,60 @@ class RepositoryScanner:
         # Return top 10 keywords
         return unique[:10]
 
+    # Directories that never contain implementation code
+    EXCLUDED_PREFIXES = (".", ".github/")
+
     def find_relevant_files(self, keywords: list[str], max_files: int = 10) -> list[str]:
-        """Find files matching keywords using git grep."""
-        if not keywords:
+        """Find files matching keywords using git grep.
+
+        Runs one search per keyword and ranks files by how many distinct
+        keywords they match, so files relevant to the whole issue surface
+        above files that merely contain a common substring. Short terms
+        (e.g. "per") and metadata directories (e.g. ".claude/", ".github/")
+        are excluded because they match nearly everything.
+        """
+        # Drop short terms: they match substrings everywhere ("per" hits
+        # "super", "person", "perform", ...) and drown out real signals.
+        terms = [k for k in keywords if len(k) > 3][:8]
+        if not terms:
             return []
-        
-        # Build grep pattern - search for any keyword
-        pattern = "|".join(keywords[:5])  # Limit to first 5 keywords
-        
-        result = subprocess.run(
-            ["git", "grep", "-l", "-i", "-E", pattern],
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        
-        files = result.stdout.strip().split("\n") if result.stdout.strip() else []
-        
-        # Filter out test files for now, prioritize source files
-        source_files = [f for f in files if not f.startswith("tests/") and not f.endswith("_test.py")]
-        test_files = [f for f in files if f.startswith("tests/") or f.endswith("_test.py")]
-        
-        # Return source files first, then test files
-        return (source_files + test_files)[:max_files]
+
+        matches: dict[str, set[str]] = {}
+        for term in terms:
+            result = subprocess.run(
+                ["git", "grep", "-l", "-i", term],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            files = {
+                line.strip()
+                for line in result.stdout.strip().split("\n")
+                if line.strip()
+                and not line.strip().startswith(self.EXCLUDED_PREFIXES)
+            }
+            matches[term] = files
+
+        # Weight each term by rarity: a file matching "wildcard" (dozens of
+        # hits repo-wide) is far more relevant than one matching only
+        # "description" (thousands of hits, mostly docs and locale catalogs).
+        scores: dict[str, float] = {}
+        for term, files in matches.items():
+            weight = 1.0 / max(len(files), 1)
+            for path in files:
+                scores[path] = scores.get(path, 0.0) + weight
+
+        def sort_key(path: str) -> tuple:
+            is_generated_catalog = path.startswith("locale/")
+            is_test = path.startswith("tests/") or path.endswith(
+                ("_test.py", ".test.cjs", ".test.js", ".test.ts")
+            )
+            # Highest score first, generated catalogs last, then source
+            # before tests, then name for determinism.
+            return (-scores[path], is_generated_catalog, is_test, path)
+
+        return sorted(scores, key=sort_key)[:max_files]
 
     def get_file_context(self, file_path: str, max_lines: int = 100) -> str:
         """Read a file and return bounded content."""

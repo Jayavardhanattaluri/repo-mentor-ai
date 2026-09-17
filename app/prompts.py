@@ -1,3 +1,5 @@
+import re
+
 # System prompt rules - included in every LLM call
 SYSTEM_RULES = """
 You are a senior software engineer assisting with Zulip (zulip/zulip) issue analysis and implementation.
@@ -238,10 +240,56 @@ Files: {', '.join(context['files'])}
 """
 
 
+def parse_plan_files(plan_md: str) -> list[str]:
+    """Extract file paths from the 'Files to Modify' section of a plan.
+
+    Handles both backticked paths (`` `zerver/models/streams.py` ``) and
+    bare bullet paths (``- zerver/models/streams.py (inferred)``), since the
+    model emits either format. Candidates must look like repo paths
+    (contain "/" plus a short file extension, no spaces). Deduplicated, in
+    order of appearance.
+    """
+    section = plan_md
+    idx = plan_md.find("Files to Modify")
+    if idx != -1:
+        section = plan_md[idx:]
+        end = section.find("\n## ", 1)
+        if end != -1:
+            section = section[:end]
+    paths: list[str] = []
+
+    def _add(candidate: str) -> None:
+        path = candidate.strip().rstrip(",;:.\"'")
+        if (
+            "/" in path
+            and " " not in path
+            and path not in paths
+            and re.search(r"\.[A-Za-z0-9]{1,5}$", path)
+        ):
+            paths.append(path)
+
+    for line in section.split("\n"):
+        for match in re.finditer(r"`([^`]+)`", line):
+            _add(match.group(1))
+        bullet = re.match(r"\s*[-•*]\s*(\S+)", line)
+        if bullet:
+            _add(bullet.group(1))
+    return paths
+
+
 def build_patch_prompt(issue: dict, plan: str, context: dict) -> str:
     """Build user prompt for patch generation."""
     nl = "\n"
     file_contents = nl.join(f"--- {f} ---\n{content}" for f, content in context['file_contents'].items())
+    missing = context.get("plan_files_missing") or []
+    missing_section = ""
+    if missing:
+        missing_section = (
+            "PLAN FILES THAT DO NOT EXIST IN THE REPOSITORY "
+            "(do NOT reference these paths; they were hallucinated):\n"
+            + nl.join(f"- {f}" for f in missing)
+            + nl
+        )
     return f"""
 ISSUE:
 Title: {issue['title']}
@@ -254,7 +302,7 @@ REPOSITORY CONTEXT:
 Commit: {context['commit']}
 Files: {', '.join(context['files'])}
 
-FILE CONTENTS (for reference):
+{missing_section}FILE CONTENTS (for reference):
 {file_contents}
 """
 
