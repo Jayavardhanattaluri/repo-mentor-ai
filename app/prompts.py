@@ -1,6 +1,5 @@
 import re
 
-# System prompt rules - included in every LLM call
 SYSTEM_RULES = """
 You are a senior software engineer assisting with Zulip (zulip/zulip) issue analysis and implementation.
 
@@ -29,7 +28,6 @@ When generating plans/patches:
 """
 
 
-# Investigation prompt
 INVESTIGATION_PROMPT = SYSTEM_RULES + """
 
 TASK: Analyze a Zulip issue and produce an investigation report.
@@ -65,7 +63,6 @@ OUTPUT FORMAT (Markdown):
 - [List things you cannot determine from provided context]
 """
 
-# Implementation plan prompt
 PLAN_PROMPT = SYSTEM_RULES + """
 
 TASK: Create a step-by-step implementation plan for a Zulip issue.
@@ -98,7 +95,6 @@ OUTPUT FORMAT (Markdown):
 [Practical advice for implementation: where to start, what to watch for, common pitfalls]
 """
 
-# Senior-to-junior proposal prompt
 PROPOSAL_PROMPT = SYSTEM_RULES + """
 
 TASK: Write a senior-to-junior developer proposal for implementing this issue.
@@ -130,19 +126,22 @@ OUTPUT FORMAT (Markdown):
 - [Question 2]
 """
 
-# Patch generation prompt
 PATCH_PROMPT = SYSTEM_RULES + """
 
 TASK: Generate a unified diff patch for the implementation.
 
 CONSTRAINTS:
-- Your ENTIRE response must be ONLY the unified diff. No reasoning, no explanation, no markdown fences.
+- Your ENTIRE response must be ONLY the unified diff. No reasoning, no explanation, no Markdown fences.
 - Start your response with the characters `diff --git` and end with the last patch line.
-- Only modify files from the approved plan.
+- Only modify files from the approved plan and supplied repository context.
+- Do not modify documentation, changelogs, or API schemas unless the plan contains repository evidence that they are part of the implementation.
 - Do not add new dependencies.
 - Follow existing code style in the repository.
-- Include test changes.
-- Every file hunk MUST include `--- a/...`, `+++ b/...`, and at least one `@@ ... @@` header followed by `+`/`-`/context lines. Never emit a bare `diff --git` line without its hunk body.
+- Include test changes when the plan identifies relevant tests.
+- Never use `...` as a placeholder for omitted patch content.
+- Never emit a patch for a file whose full relevant content was not supplied.
+- Every file hunk MUST include `--- a/...`, `+++ b/...`, and at least one `@@ ... @@` header followed by `+`/`-`/context lines.
+- If the supplied context is insufficient to implement the issue, output exactly `CANNOT_IMPLEMENT_WITH_CURRENT_CONTEXT` instead of a patch.
 
 OUTPUT FORMAT (repeat per file, concatenated):
 diff --git a/path/to/file.py b/path/to/file.py
@@ -154,7 +153,6 @@ diff --git a/path/to/file.py b/path/to/file.py
 +new line
 """
 
-# Failure analysis prompt
 FAILURE_ANALYSIS_PROMPT = SYSTEM_RULES + """
 
 TASK: Analyze test failure and suggest a fix.
@@ -177,7 +175,6 @@ OUTPUT FORMAT (Markdown):
 
 
 def build_investigation_prompt(issue: dict, context: dict) -> str:
-    """Build user prompt for investigation."""
     nl = "\n"
     files_list = nl.join(f"- {f}" for f in context['files'])
     file_contents = nl.join(f"--- {f} ---\n{content}" for f, content in context['file_contents'].items())
@@ -202,7 +199,6 @@ FILE CONTENTS:
 
 
 def build_plan_prompt(issue: dict, investigation: str, context: dict) -> str:
-    """Build user prompt for implementation plan."""
     nl = "\n"
     file_contents = nl.join(f"--- {f} ---\n{content}" for f, content in context['file_contents'].items())
     return f"""
@@ -225,7 +221,6 @@ FILE CONTENTS:
 
 
 def build_proposal_prompt(issue: dict, plan: str, context: dict) -> str:
-    """Build user prompt for senior-to-junior proposal."""
     return f"""
 ISSUE:
 Title: {issue['title']}
@@ -241,14 +236,7 @@ Files: {', '.join(context['files'])}
 
 
 def parse_plan_files(plan_md: str) -> list[str]:
-    """Extract file paths from the 'Files to Modify' section of a plan.
-
-    Handles both backticked paths (`` `zerver/models/streams.py` ``) and
-    bare bullet paths (``- zerver/models/streams.py (inferred)``), since the
-    model emits either format. Candidates must look like repo paths
-    (contain "/" plus a short file extension, no spaces). Deduplicated, in
-    order of appearance.
-    """
+    """Extract file paths from the 'Files to Modify' section of a plan."""
     section = plan_md
     idx = plan_md.find("Files to Modify")
     if idx != -1:
@@ -278,7 +266,6 @@ def parse_plan_files(plan_md: str) -> list[str]:
 
 
 def build_patch_prompt(issue: dict, plan: str, context: dict) -> str:
-    """Build user prompt for patch generation."""
     nl = "\n"
     file_contents = nl.join(f"--- {f} ---\n{content}" for f, content in context['file_contents'].items())
     missing = context.get("plan_files_missing") or []
@@ -290,6 +277,11 @@ def build_patch_prompt(issue: dict, plan: str, context: dict) -> str:
             + nl.join(f"- {f}" for f in missing)
             + nl
         )
+    approved = context.get("approved_files") or []
+    approved_section = (
+        "APPROVED FILES:\n" + nl.join(f"- {f}" for f in approved) + nl
+        if approved else ""
+    )
     return f"""
 ISSUE:
 Title: {issue['title']}
@@ -302,13 +294,12 @@ REPOSITORY CONTEXT:
 Commit: {context['commit']}
 Files: {', '.join(context['files'])}
 
-{missing_section}FILE CONTENTS (for reference):
+{approved_section}{missing_section}FILE CONTENTS (for reference):
 {file_contents}
 """
 
 
 def build_failure_analysis_prompt(issue: dict, plan: str, patch: str, test_result: dict, context: dict) -> str:
-    """Build user prompt for failure analysis."""
     return f"""
 ISSUE:
 Title: {issue['title']}
