@@ -1,0 +1,8 @@
+openai
+httpx
+python-dotenv
+pydantic
+typer
+rich
+pytest
+ruff

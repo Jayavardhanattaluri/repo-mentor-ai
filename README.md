@@ -1,0 +1,48 @@
+# repo-mentor-ai
+
+LLM-assisted open-source issue solver for Zulip.
+
+## Setup
+
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1  # Windows
+# source .venv/bin/activate  # Linux/macOS
+
+pip install -e .
+cp .env.example .env
+# Edit .env with your tokens and paths
+```
+
+## Usage
+
+```bash
+# Fetch issues with "help wanted" label
+python -m app.cli fetch-issues
+
+# Fetch issues with a different label
+python -m app.cli fetch-issues --label "good first issue"
+
+# Analyze an issue (placeholder)
+python -m app.cli analyze 12345
+```
+
+## Commands
+
+- `fetch-issues` - List open issues from zulip/zulip
+- `analyze` - Analyze an issue (Milestone 3+)
+- `implement` - Generate implementation (Milestone 5+)
+- `validate` - Run tests and linting (Milestone 6+)
+- `report` - Generate final report (Milestone 6+)
+
+## Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_TOKEN` | GitHub Personal Access Token (read-only for MVP) |
+| `NVIDIA_API_KEY` | NVIDIA NIM API key |
+| `NVIDIA_BASE_URL` | NVIDIA NIM base URL (default: https://integrate.api.nvidia.com/v1) |
+| `NVIDIA_MODEL` | Model name (e.g., `meta/llama-3.1-70b-instruct`) |
+| `ZULIP_REPO_PATH` | Absolute path to local Zulip clone |
+| `OUTPUT_DIR` | Output directory (default: `outputs`) |
+| `MAX_FILE_CHARS` | Max characters per file for LLM context (default: 12000) |
