@@ -2,6 +2,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.patch_validator import PatchValidationError, validate_patch_format
+
 
 @dataclass
 class PatchResult:
@@ -21,12 +23,9 @@ class PatchManager:
         """Create an isolated worktree for the issue."""
         branch_name = f"issue-{issue_number}-auto"
         worktree_path = self.worktree_base / branch_name
-        
-        # Remove existing worktree if it exists
         if worktree_path.exists():
             self.remove_worktree(issue_number)
-        
-        # Create worktree
+
         result = subprocess.run(
             ["git", "worktree", "add", "-b", branch_name, str(worktree_path), base_branch],
             cwd=self.repo_path,
@@ -34,21 +33,17 @@ class PatchManager:
             text=True,
             check=False,
         )
-        
         if result.returncode != 0:
             raise RuntimeError(f"Failed to create worktree: {result.stderr}")
-        
         return worktree_path, branch_name
 
     def remove_worktree(self, issue_number: int) -> PatchResult:
         """Remove the worktree for an issue."""
         branch_name = f"issue-{issue_number}-auto"
         worktree_path = self.worktree_base / branch_name
-        
         if not worktree_path.exists():
             return PatchResult(True, "Worktree does not exist")
-        
-        # Remove worktree
+
         result = subprocess.run(
             ["git", "worktree", "remove", "--force", str(worktree_path)],
             cwd=self.repo_path,
@@ -56,11 +51,9 @@ class PatchManager:
             text=True,
             check=False,
         )
-        
         if result.returncode != 0:
             return PatchResult(False, f"Failed to remove worktree: {result.stderr}")
-        
-        # Delete branch
+
         subprocess.run(
             ["git", "branch", "-D", branch_name],
             cwd=self.repo_path,
@@ -68,11 +61,18 @@ class PatchManager:
             text=True,
             check=False,
         )
-        
         return PatchResult(True, "Worktree removed")
 
     def validate_patch(self, worktree_path: Path, patch_path: Path) -> PatchResult:
-        """Validate a patch can be applied cleanly."""
+        """Validate patch structure and that git can apply it cleanly."""
+        try:
+            patch_text = patch_path.read_text(encoding="utf-8")
+            validate_patch_format(patch_text)
+        except (OSError, UnicodeError) as error:
+            return PatchResult(False, f"Unable to read patch: {error}")
+        except PatchValidationError as error:
+            return PatchResult(False, f"Patch rejected before git validation: {error}")
+
         result = subprocess.run(
             ["git", "apply", "--check", str(patch_path)],
             cwd=worktree_path,
@@ -80,11 +80,14 @@ class PatchManager:
             text=True,
             check=False,
         )
-        
         if result.returncode == 0:
             return PatchResult(True, "Patch validates successfully", result.stdout, result.stderr)
-        else:
-            return PatchResult(False, f"Patch validation failed: {result.stderr}", result.stdout, result.stderr)
+        return PatchResult(
+            False,
+            f"Patch validation failed: {result.stderr}",
+            result.stdout,
+            result.stderr,
+        )
 
     def apply_patch(self, worktree_path: Path, patch_path: Path) -> PatchResult:
         """Apply a validated patch."""
@@ -95,11 +98,9 @@ class PatchManager:
             text=True,
             check=False,
         )
-        
         if result.returncode == 0:
             return PatchResult(True, "Patch applied successfully", result.stdout, result.stderr)
-        else:
-            return PatchResult(False, f"Patch application failed: {result.stderr}", result.stdout, result.stderr)
+        return PatchResult(False, f"Patch application failed: {result.stderr}", result.stdout, result.stderr)
 
     def show_diff(self, worktree_path: Path) -> str:
         """Show the diff of changes in the worktree."""
@@ -151,7 +152,6 @@ class PatchManager:
 
     def commit_changes(self, worktree_path: Path, message: str) -> PatchResult:
         """Commit changes in the worktree."""
-        # Stage all changes
         result = subprocess.run(
             ["git", "add", "-A"],
             cwd=worktree_path,
@@ -161,7 +161,7 @@ class PatchManager:
         )
         if result.returncode != 0:
             return PatchResult(False, f"Git add failed: {result.stderr}")
-        
+
         result = subprocess.run(
             ["git", "commit", "-m", message],
             cwd=worktree_path,
