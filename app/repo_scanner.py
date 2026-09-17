@@ -5,6 +5,28 @@ from pathlib import Path
 from app.config import MAX_FILE_CHARS
 
 
+ISSUE_TERM_MAP = {
+    "wildcard mention": [
+        "wildcard_mention",
+        "realm_can_mention_many_users_group",
+        "can_mention_many_users",
+        "wildcard_mention_threshold",
+        "wildcard_mention_policy",
+        "@all",
+        "@everyone",
+        "@stream",
+    ],
+    "channel permission": [
+        "stream_permission",
+        "stream_setting",
+        "channel_permission",
+        "GroupPermissionSetting",
+        "stream_group",
+        "do_change_stream_group_based_setting",
+    ],
+}
+
+
 class RepositoryScanner:
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path
@@ -43,8 +65,7 @@ class RepositoryScanner:
     def extract_keywords(self, issue_title: str, issue_body: str) -> list[str]:
         """Extract potential search keywords from issue text."""
         text = (issue_title + " " + issue_body).lower()
-        
-        # Remove common words
+
         stopwords = {
             "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
             "of", "with", "by", "from", "as", "is", "was", "are", "were", "be",
@@ -58,41 +79,41 @@ class RepositoryScanner:
             "just", "now", "then", "here", "there", "issue", "fix", "add", "remove", "update", "change", "improve", "make",
             "allow", "support", "enable", "disable", "create", "delete", "get", "set",
         }
-        
-        # Extract words (alphanumeric + underscore)
+
         words = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', text)
-        
-        # Filter: length > 2, not stopword, not all caps (likely acronym)
         keywords = [
             w for w in words
             if len(w) > 2 and w not in stopwords and not w.isupper()
         ]
-        
-        # Deduplicate, preserve order
+
         seen = set()
         unique = []
         for w in keywords:
             if w not in seen:
                 seen.add(w)
                 unique.append(w)
-        
-        # Return top 10 keywords
+
         return unique[:10]
 
-    # Directories that never contain implementation code
     EXCLUDED_PREFIXES = (".", ".github/")
 
-    def find_relevant_files(self, keywords: list[str], max_files: int = 10) -> list[str]:
-        """Find files matching keywords using git grep.
+    @staticmethod
+    def issue_terms(issue_title: str, issue_body: str) -> list[str]:
+        """Return exact repository symbols implied by known issue concepts."""
+        text = f"{issue_title} {issue_body}".lower()
+        terms: list[str] = []
+        for phrase, candidates in ISSUE_TERM_MAP.items():
+            if phrase in text:
+                terms.extend(candidates)
+        return list(dict.fromkeys(terms))
 
-        Runs one search per keyword and ranks files by how many distinct
-        keywords they match, so files relevant to the whole issue surface
-        above files that merely contain a common substring. Short terms
-        (e.g. "per") and metadata directories (e.g. ".claude/", ".github/")
-        are excluded because they match nearly everything.
+    def find_relevant_files(self, keywords: list[str], max_files: int = 10) -> list[str]:
+        """Find relevant files using issue-specific symbols plus issue keywords.
+
+        Exact domain symbols are searched before generic natural-language terms.
+        Files are ranked by weighted distinct-term matches, with generated
+        catalogs and tests deprioritized on ties.
         """
-        # Drop short terms: they match substrings everywhere ("per" hits
-        # "super", "person", "perform", ...) and drown out real signals.
         terms = [k for k in keywords if len(k) > 3][:8]
         if not terms:
             return []
@@ -114,9 +135,6 @@ class RepositoryScanner:
             }
             matches[term] = files
 
-        # Weight each term by rarity: a file matching "wildcard" (dozens of
-        # hits repo-wide) is far more relevant than one matching only
-        # "description" (thousands of hits, mostly docs and locale catalogs).
         scores: dict[str, float] = {}
         for term, files in matches.items():
             weight = 1.0 / max(len(files), 1)
@@ -128,11 +146,21 @@ class RepositoryScanner:
             is_test = path.startswith("tests/") or path.endswith(
                 ("_test.py", ".test.cjs", ".test.js", ".test.ts")
             )
-            # Highest score first, generated catalogs last, then source
-            # before tests, then name for determinism.
             return (-scores[path], is_generated_catalog, is_test, path)
 
         return sorted(scores, key=sort_key)[:max_files]
+
+    def find_issue_files(
+        self,
+        issue_title: str,
+        issue_body: str,
+        max_files: int = 10,
+    ) -> tuple[list[str], list[str]]:
+        """Find files using exact domain terms first, then generic keywords."""
+        domain_terms = self.issue_terms(issue_title, issue_body)
+        keywords = self.extract_keywords(issue_title, issue_body)
+        search_terms = list(dict.fromkeys(domain_terms + keywords))
+        return search_terms, self.find_relevant_files(search_terms, max_files=max_files)
 
     def get_file_context(self, file_path: str, max_lines: int = 100) -> str:
         """Read a file and return bounded content."""
@@ -145,13 +173,14 @@ class RepositoryScanner:
 
 def build_context_for_issue(scanner: RepositoryScanner, issue: dict) -> dict:
     """Build repository context for an issue."""
-    keywords = scanner.extract_keywords(issue.get("title", ""), issue.get("body", ""))
-    files = scanner.find_relevant_files(keywords)
-    
+    keywords, files = scanner.find_issue_files(
+        issue.get("title", ""), issue.get("body", "")
+    )
+
     file_contents = {}
-    for f in files[:5]:  # Limit to 5 files for context
+    for f in files[:5]:
         file_contents[f] = scanner.get_file_context(f)
-    
+
     return {
         "commit": scanner.current_commit(),
         "keywords": keywords,
