@@ -16,8 +16,18 @@ def _mock_grep(mapping: dict[str, str]):
     return _run
 
 
+def test_issue_terms_add_domain_symbols():
+    scanner = RepositoryScanner(Path("/tmp"))
+    terms = scanner.issue_terms(
+        "Make wildcard mention permissions configurable per-channel", ""
+    )
+    assert "realm_can_mention_many_users_group" in terms
+    assert "can_mention_many_users" in terms
+    assert "GroupPermissionSetting" in terms
+    assert "do_change_stream_group_based_setting" in terms
+
+
 def test_find_relevant_files_ranks_by_keyword_hits():
-    """Files matching more keywords rank first."""
     scanner = RepositoryScanner(Path("/tmp"))
     mapping = {
         "wildcard": "zerver/lib/permissions.py\nweb/src/compose.js\n",
@@ -31,7 +41,6 @@ def test_find_relevant_files_ranks_by_keyword_hits():
 
 
 def test_find_relevant_files_excludes_metadata_dirs():
-    """Dot-directories and .github never surface as relevant files."""
     scanner = RepositoryScanner(Path("/tmp"))
     mapping = {
         "wildcard": ".claude/rules/x.md\n.github/workflows/ci.yml\nzerver/models/streams.py\n",
@@ -45,7 +54,6 @@ def test_find_relevant_files_excludes_metadata_dirs():
 
 
 def test_find_relevant_files_ignores_short_terms():
-    """Terms of length <= 3 are not searched (they match substrings everywhere)."""
     scanner = RepositoryScanner(Path("/tmp"))
     with patch("app.repo_scanner.subprocess.run") as mock_run:
         files = scanner.find_relevant_files(["per", "an", "the"])
@@ -55,7 +63,6 @@ def test_find_relevant_files_ignores_short_terms():
 
 
 def test_find_relevant_files_weights_rare_terms_higher():
-    """A file matching a rare term outranks one matching only a common term."""
     scanner = RepositoryScanner(Path("/tmp"))
     mapping = {
         "wildcard": "zerver/models/streams.py\n",
@@ -68,7 +75,6 @@ def test_find_relevant_files_weights_rare_terms_higher():
 
 
 def test_find_relevant_files_deprioritizes_locale_catalogs():
-    """Generated translation catalogs sort after real files on equal scores."""
     scanner = RepositoryScanner(Path("/tmp"))
     mapping = {
         "mention": "locale/fr/translations.json\nweb/src/compose.js\n",
@@ -80,7 +86,6 @@ def test_find_relevant_files_deprioritizes_locale_catalogs():
 
 
 def test_find_relevant_files_prefers_source_over_tests():
-    """On equal hit counts, source files come before test files."""
     scanner = RepositoryScanner(Path("/tmp"))
     mapping = {
         "wildcard": "zerver/lib/permissions.py\nzerver/tests/test_perms.py\n",
@@ -92,37 +97,29 @@ def test_find_relevant_files_prefers_source_over_tests():
 
 
 def test_extract_keywords():
-    """Test keyword extraction from issue text."""
     scanner = RepositoryScanner(Path("/tmp"))
-    
     keywords = scanner.extract_keywords(
         "Fix typo in documentation",
         "There is a typo in the README file that needs fixing."
     )
-    
     assert "typo" in keywords
     assert "documentation" in keywords
     assert "readme" in keywords
     assert "fixing" in keywords
-    # Stopwords should be filtered
     assert "the" not in keywords
     assert "in" not in keywords
     assert "a" not in keywords
 
 
 def test_extract_keywords_filters_stopwords():
-    """Test that common stopwords are filtered out."""
     scanner = RepositoryScanner(Path("/tmp"))
-    
     keywords = scanner.extract_keywords(
         "The issue is about the thing",
         "This and that are not important"
     )
-    
-    # "issue" is in stopwords list, so it's filtered
     assert "thing" in keywords
     assert "important" in keywords
-    assert "about" in keywords  # "about" is not in stopwords
+    assert "about" in keywords
     assert "the" not in keywords
     assert "is" not in keywords
     assert "this" not in keywords
@@ -132,25 +129,25 @@ def test_extract_keywords_filters_stopwords():
     assert "not" not in keywords
 
 
-def test_build_context_for_issue_mock():
-    """Test build_context_for_issue with mocked scanner."""
-    mock_scanner = MagicMock(spec=RepositoryScanner)
-    mock_scanner.current_commit.return_value = "abc123"
-    mock_scanner.extract_keywords.return_value = ["test", "feature"]
-    mock_scanner.find_relevant_files.return_value = ["src/test.py", "tests/test_test.py"]
-    mock_scanner.get_file_context.return_value = "def test():\n    pass"
-    
+def test_build_context_for_issue_uses_domain_terms():
+    scanner = MagicMock(spec=RepositoryScanner)
+    scanner.current_commit.return_value = "abc123"
+    scanner.find_issue_files.return_value = (
+        ["realm_can_mention_many_users_group"],
+        ["web/src/compose_validate.ts"],
+    )
+    scanner.get_file_context.return_value = "const permission = true;"
+
     issue = {
-        "number": 123,
-        "title": "Test issue",
-        "body": "Test body",
-        "html_url": "https://github.com/zulip/zulip/issues/123",
+        "number": 38384,
+        "title": "Make wildcard mention permissions configurable per-channel",
+        "body": "",
     }
-    
-    context = build_context_for_issue(mock_scanner, issue)
-    
+
+    context = build_context_for_issue(scanner, issue)
+
+    scanner.find_issue_files.assert_called_once_with(issue["title"], issue["body"])
     assert context["commit"] == "abc123"
-    assert context["keywords"] == ["test", "feature"]
-    assert context["files"] == ["src/test.py", "tests/test_test.py"]
-    assert "src/test.py" in context["file_contents"]
-    assert "tests/test_test.py" in context["file_contents"]
+    assert context["keywords"] == ["realm_can_mention_many_users_group"]
+    assert context["files"] == ["web/src/compose_validate.ts"]
+    assert "web/src/compose_validate.ts" in context["file_contents"]
